@@ -1,0 +1,18 @@
+digraph G {
+    rankdir=LR;
+
+    node [shape=square] mutex;
+    node [shape=circle] releasing, g1, g2;
+    node [style=filled,shape=doublecircle] barging, g0;
+
+        subgraph cluster_1 {
+                node [style=filled];
+                g0-> g1 -> g2;
+                label = "queue";
+                color= black;
+        }
+
+        releasing -> g0 [label = "wake"];
+        barging -> mutex [label = "CAS"];
+        g0 -> mutex [label = "CAS"];
+}

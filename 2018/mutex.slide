@@ -1,0 +1,299 @@
+Mutex Fairness
+30 Jul 2018
+
+Daniel White
+Notifications Team, SEEK
+
+* Golang 1.9: Release Notes
+
+.image mutex/_static/release-notes.png
+
+: Failed release party lightning talk.
+: This caught my eye.
+: Why just a vague footnote?
+: What did it mean?
+
+* Mechanical Sympathy
+
+: First, why should we even care? It's better, right?
+
+	“You don’t have to be an engineer to be a racing driver,
+	but you do have to have Mechanical Sympathy.”
+
+		– Jackie Stewart?
+
+: F1 driver; may very well be apocryphal.
+
+: The concept is that it's useful to understand what we're building.
+: There is a fine balance, however, when assumptions can be changed or fixed.
+
+- When something doesn't work, it's possible to reason about why.
+- If you need to push the limits, you know how. [[https://martinfowler.com/articles/lmax.html][LMAX]] is a great example.
+
+.link https://www.infoq.com/interviews/martin-thompson-Low-Latency
+
+* What was the problem?
+
+Late in October, Russ Cox posted an example based on two goroutines.
+
+- A: Holds a lock for a long time, and briefly releases it.
+- B: Release lock for a long time, and briefly acquires it.
+
+: What do you expect?
+: You might assume goroutine 2 would get the lock less frequently, but still within a _reasonable_ amount of time.
+: Observed to be 100+ seconds.
+
+* Demo: Lockskew
+
+.play mutex/go1.8/lockskew.go /START/,/END/
+
+* Mutex
+
+Consists of state and a wait queue.
+
+.code mutex/go1.8/sync/mutex.go /1MUX/,/2MUX/
+
+The state is a bit field:
+
+  +---------------------------+
+  | 32 ... 2 | 1     | 0      |
+  +----------+-------+--------+
+  | Waiters  | Woken | Locked |
+  +---------------------------+
+
+* Mutex.Lock (1)
+
+Assume uncontended; compare-and-swap (CAS).
+
+.code mutex/go1.8/sync/mutex.go /1CAS/,/2CAS/
+
+Otherwise, start actively spin to see if lock is released.
+
+  if runtime_canSpin(iter) {
+     if has_blocked_waiters(old) && CAS(&m.state, old, old|mutexWoken) {
+        awoke = true
+     }
+     runtime_doSpin()
+     iter++
+  }
+
+`mutexWoken` ensures current owner won't wake anyone else.
+
+: Uniprocessors will _never_ spin.
+
+* Mutex.Lock (2)
+
+- If the goroutine has spun for too long, join a queue.
+
+- Uses an asynchronous semaphore implementation. See: [[https://swtch.com/semaphore.pdf][Semaphores in Plan 9]]
+
+: Similar to a Linux futex.
+
+: Two variants: futex, and sema; depending on OS support.
+
+.code mutex/go1.8/sync/mutex.go /1SEMA/,/2SEMA/
+
+: When previous state was unlocked, we have a lock now!
+
+- Once woken, retry the active spin protocol.
+
+: This can be interrupted by barging!
+
+: LIFO flag was not in original code; semantics were FIFO.
+
+: Failure to acquire always results in entry at end of queue. :(
+
+* Mutex.Unlock
+
+- Drop lock quickly to allow for barging.
+
+.code mutex/go1.8/sync/mutex.go /1DROP/,/2DROP/
+
+- If no goroutine is awake, signal next waiter in the queue.
+
+.code mutex/go1.8/sync/mutex.go /2HOFF/,/3HOFF/
+
+: Explicitly choosing _not_ to handoff directly.
+
+- A scheduled goroutine can beat the signaled waiter.
+
+: This is the crux of our toy problem.
+
+* Barging FIFO
+
+- Initial compare-and-swap means new, active goroutines can win race with blocked goroutines.
+
+.image mutex/_static/barging.png
+
+- This was observed by Doug Lea in [[http://gee.cs.oswego.edu/dl/papers/aqs.pdf][The java.util.concurrent Synchronizer Framework]] to offer higher aggregate throughput.
+- Probabilistically fair.
+
+: Russ Cox speculates that barging avoids some bad OS scheduling decisions.
+
+* Preventing Barging
+
+  // goroutine 1
+  go func() {
+          [ .. ]
+          default:
+              mu2.Lock()
+              mu.Lock()
+              mu2.Unlock()
+              time.Sleep(100 * time.Microsecond)
+              mu.Unlock()
+          }
+      }
+  }()
+  
+  // goroutine 2
+  for i := 0; i < n; i++ {
+      time.Sleep(100 * time.Microsecond)
+      mu2.Lock()
+      mu.Lock()
+      mu2.Unlock()
+      mu.Unlock()
+  }
+
+: Pairs of locks.
+: Complicates user code, even if wrapped up as a "FairMutex".
+  
+* What's the goal?
+
+Better defaults without:
+
+- Sacrificing performance, or
+- Imposing complexity on users.
+
+: Performance: maintain high throughput for low contention.
+: Performance: minimise unnecessary scheduling.
+
+* Simple Solution
+
+Reduce handoff period by yielding to scheduler.
+
+.code mutex/gosched/sync/mutex.go /START/,/END/
+
+Addresses the pathological case:
+
+    done in 14.34µs
+    done in 118.437µs
+    done in 2.813µs
+    done in 118.123µs
+    done in 170.183µs
+
+Downside: introduces extract goroutine switching overhead.
+
+* What's the solution?
+
+- Introduce a starvation mode.
+- Prevents pathological cases of tail latency.
+- Fix bug causing goroutines to be requeued at end of wait queue.
+
+.link https://go-review.googlesource.com/c/go/+/34310
+
+* Starvation Mode: Mutex.Lock (1)
+
+Bug fix! Woken goroutines that lose to barging would be queued at the end again.
+
+.code mutex/go1.10/sync/mutex.go /1LIFO/,/2LIFO/
+
+This is also used to detect starvation mode.
+
+.code mutex/go1.10/sync/mutex.go /2LIFO/,/3LIFO/
+
+* Starvation Mode: Mutex.Lock (2)
+
+Which is added to Mutex state.
+
+.code mutex/go1.10/sync/mutex.go /3STARVE/,/4STARVE/
+
+The bit now looks like:
+
+  +----------+----------+-------+--------+
+  | 32 ... 3 | 2        | 1     | 0      |
+  +----------+----------+-------+--------+
+  | Waiters  | Starving | Woken | Locked |
+  +----------+----------+-------+--------+
+
+When in starvation mode, other threads will immediately join the queue.
+
+.code mutex/go1.10/sync/mutex.go /1STARVE/,/2STARVE/
+
+* Starvation Mode: Mutex.Unlock
+
+When in starvation mode, the next goroutine is handed ownership.
+
+  handoff := new&mutexStarving != 0
+  runtime_Semrelease(&m.sema, handoff)
+
+Acquisition can succeed immediately in handoff, because other waiters
+are not competing for ownership.
+
+: If it started waiting more than 1ms ago.
+
+: More going on in the Semacquire/Semrelease implementation.
+
+* Semaphores (1)
+
+`runtime_SemacquireMutex` parked a `goroutine`.
+
+	func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags) {
+		[ ... ]
+		goparkunlock(&root.lock, "semacquire", traceEvGoBlockSync, 4)
+		if s.ticket != 0 || cansemacquire(addr) {
+			break
+		}
+
+This parked goroutine, `s` is unparked by `runtime_Semrelease`:
+
+	func semrelease1(addr *uint32, handoff bool) {
+		[ ... ]
+		if handoff && cansemacquire(addr) {
+			s.ticket = 1
+		}
+		readyWithTime(s, 5)
+
+* Semaphores (2)
+
+- Quite a bit more going on with semphore and scheduler.
+- Semaphore uses a randomized search tree to manage queue.
+
+.link https://en.wikipedia.org/wiki/Treap
+.link http://faculty.washington.edu/aragon/pubs/rst89.pdf
+
+* Demo: Lockskew (1.9+)
+
+.play mutex/go1.10/lockskew.go /START/,/END/
+
+* Benchmarking (is hard ...)
+
+: Microbenchmarks aren't really enough.
+
+Idea? Use `rand.Int` as a source of contention.
+
+.code mutex/go1.10/sync/bench_test.go /START/,/END/
+
+  $ benchcmp old.txt new.txt
+  benchmark               old ns/op     new ns/op     delta
+  BenchmarkRand/1-4       96.6          103           +6.63%
+  BenchmarkRand/2-4       105           119           +13.33%
+  [ ... ]
+  BenchmarkRand/64-4      150           139           -7.33%
+  BenchmarkRand/128-4     147           154           +4.76%
+
+Better suite in the package:
+
+.link https://github.com/golang/go/blob/master/src/sync/mutex_test.go
+
+* More Reading
+
+- [[https://github.com/golang/go/issues/13086][Bug report]]
+- [[https://go-review.googlesource.com/c/go/+/34310][cl/34310]]
+- [[https://go-review.googlesource.com/c/go/+/34310/8/src/sync/mutex.go][Details about the starvation threshold]]
+
+Other work
+
+- [[http://gee.cs.oswego.edu/dl/papers/aqs.pdf][The java.util.concurrent Synchronizer Framework]]: Doug Lea's work tends to inform modern implementations.
+- [[https://webkit.org/blog/6161/locking-in-webkit/][Locking in Webkit]]: Implementation and performance of adaptive locks within WebKit.
+- [[http://joeduffyblog.com/2006/12/14/anticonvoy-locks-in-windows-server-2003-sp1-and-windows-vista/][Anti-convoy locks in Windows Server 2003 SP1 and Windows Vista]]
+- [[https://www.cs.purdue.edu/homes/hosking/papers/pppj11.pdf][Fine-grained Adaptive Biased Locking]]: Work based on the Jikes RVM; origin of some spin counts.
