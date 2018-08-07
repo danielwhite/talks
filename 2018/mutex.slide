@@ -12,13 +12,14 @@ Notifications Team, SEEK
 : This caught my eye.
 : Why just a vague footnote?
 : What did it mean?
+: Why even care?
 
 * Mechanical Sympathy
 
 : First, why should we even care? It's better, right?
 
 	“You don’t have to be an engineer to be a racing driver,
-	but you do have to have Mechanical Sympathy.”
+	 but you do have to have Mechanical Sympathy.”
 
 		– Jackie Stewart?
 
@@ -53,6 +54,8 @@ Late in October, Russ Cox posted an example based on two goroutines.
 
 * Mutex
 
+: Background; how does Go maintain a mutex?
+
 Consists of state and a wait queue.
 
 .code mutex/go1.8/sync/mutex.go /1MUX/,/2MUX/
@@ -69,6 +72,8 @@ The state is a bit field:
 
 Assume uncontended; compare-and-swap (CAS).
 
+: Best case; allows for almost zero cost and no scheduling overhead.
+
 .code mutex/go1.8/sync/mutex.go /1CAS/,/2CAS/
 
 Otherwise, start actively spin to see if lock is released.
@@ -80,6 +85,8 @@ Otherwise, start actively spin to see if lock is released.
      runtime_doSpin()
      iter++
   }
+
+: Spinning ties up compute resources; so isn't ideal for long periods.
 
 `mutexWoken` ensures current owner won't wake anyone else.
 
@@ -254,6 +261,8 @@ are not competing for ownership.
 			break
 		}
 
+: Thread sleeps, waiting to be woken.
+
 This parked goroutine, `s` is unparked by `runtime_Semrelease`:
 
 	func semrelease1(addr *uint32, handoff bool) {
@@ -262,6 +271,10 @@ This parked goroutine, `s` is unparked by `runtime_Semrelease`:
 			s.ticket = 1
 		}
 		readyWithTime(s, 5)
+
+: The handoff ensures that the woken thread is given the lock directly.
+
+: Probably simplification of reality.
 
 * Semaphores (2)
 
