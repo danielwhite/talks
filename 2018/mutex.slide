@@ -47,6 +47,10 @@ Late in October, Russ Cox posted an example based on two goroutines.
 
 .play mutex/go1.8/lockskew.go /START/,/END/
 
+: Don't do that?
+: Seen in production for a "long-running" journal transaction.
+: Example: Kubernetes
+
 * Mutex
 
 Consists of state and a wait queue.
@@ -164,7 +168,7 @@ Better defaults without:
 - Sacrificing performance, or
 - Imposing complexity on users.
 
-: Performance: maintain high throughput for low contention.
+: Performance: maintain throughput during high contention.
 : Performance: minimise unnecessary scheduling.
 
 * Simple Solution
@@ -200,6 +204,12 @@ Bug fix! Woken goroutines that lose to barging would be queued at the end again.
 This is also used to detect starvation mode.
 
 .code mutex/go1.10/sync/mutex.go /2LIFO/,/3LIFO/
+
+Speculation: threshold infomred by [[https://blog.golang.org/ismmkeynote][GC latency enhancements]].
+
+: Threshold is 1ms.
+: Threshold is intend to address perceived latency.
+: Latency tends to be cumulative, so having an "upper" bound is useful.
 
 * Starvation Mode: Mutex.Lock (2)
 
@@ -287,7 +297,7 @@ Better suite in the package:
 
 * More Reading
 
-- [[https://github.com/golang/go/issues/13086][Bug report]]
+- [[https://github.com/golang/go/issues/13086][Initial proposal]]
 - [[https://go-review.googlesource.com/c/go/+/34310][cl/34310]]
 - [[https://go-review.googlesource.com/c/go/+/34310/8/src/sync/mutex.go][Details about the starvation threshold]]
 
