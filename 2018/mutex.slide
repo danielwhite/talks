@@ -35,7 +35,7 @@ Notifications Team, SEEK
 
 * What was the problem?
 
-Late in October, Russ Cox posted an example based on two goroutines.
+Late in October *2015*, Russ Cox posted an example based on two goroutines.
 
 - A: Holds a lock for a long time, and briefly releases it.
 - B: Release lock for a long time, and briefly acquires it.
